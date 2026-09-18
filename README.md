@@ -1,4 +1,4 @@
-# Unified-Remote-Linux-Wayland-Fix
+# Unified Remote Fix for Wayland on Linux
 A simple fix for mouse input in Unified Remote when using it on Linux Wayland environments.
 
 Just download the Unified-Remote-Linux-Wayland-Fix.zip file from this repo, extract it and copy the "remotes" files to your Unified Remote folder.
