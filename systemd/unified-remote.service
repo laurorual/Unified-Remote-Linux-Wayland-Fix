@@ -1,0 +1,13 @@
+[Unit]
+Description=Unified Remote Server
+
+[Service]
+Type=forking
+WorkingDirectory=%h/Downloads/UnifiedRemoteServer
+ExecStart=%h/Downloads/UnifiedRemoteServer/urserver --daemon --pidfile=%h/.urserver/urserver.pid
+PIDFile=%h/.urserver/urserver.pid
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
