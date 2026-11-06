@@ -1,23 +1,15 @@
 local keyboard = libs.keyboard;
 local mouse = libs.mouse;
 local fs = libs.fs;
-
-local function quote(s)
-    return "'" .. tostring(s):gsub("'", "'\\''") .. "'";
-end
+local native_keyboard;
 
 local function send_text(text)
-    if not OS_LINUX then
-        return keyboard.text(text);
-    end
+    if not OS_LINUX then return keyboard.text(text); end
     if text == nil or text == "" then return; end
-    local helper = fs.combine(fs.remotedir(), "../Keyboard/wayland_text.py");
-    local out = libs.script.shell(
-        "printf '%s' " .. quote(text) .. " | /usr/bin/python3 " .. quote(helper) .. " --send"
-    );
-    if out == nil or not tostring(out):match("^OK") then
-        error("KDE Wayland text input failed");
+    if not native_keyboard then
+        native_keyboard = dofile(fs.combine(fs.remotedir(), "../Keyboard/wayland_ffi.lua"));
     end
+    native_keyboard.send(text);
 end
 
 actions.KeyDown = function (...)

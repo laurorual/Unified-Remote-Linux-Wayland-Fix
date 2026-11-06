@@ -1,13 +1,18 @@
+# Manual example only. Prefer install.sh --install-service, which generates the real path.
+# Replace BOTH /absolute/path/to/UnifiedRemoteServer paths before using this example.
 [Unit]
 Description=Unified Remote Server
+After=graphical-session-pre.target
+PartOf=graphical-session.target
 
 [Service]
 Type=forking
-WorkingDirectory=%h/Downloads/UnifiedRemoteServer
-ExecStart=%h/Downloads/UnifiedRemoteServer/urserver --daemon --pidfile=%h/.urserver/urserver.pid
+WorkingDirectory=/absolute/path/to/UnifiedRemoteServer
+ExecStart=/usr/bin/env -- "/absolute/path/to/UnifiedRemoteServer/urserver" --daemon "--pidfile=%h/.urserver/urserver.pid"
 PIDFile=%h/.urserver/urserver.pid
+Environment=XDG_SESSION_TYPE=wayland
 Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

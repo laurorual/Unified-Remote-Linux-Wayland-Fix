@@ -1,5 +1,0 @@
->>> Local do systemd service
-$HOME/.config/systemd/user/unified-remote.service
-
->>> Local do servidor
-/UnifiedRemoteServer/
