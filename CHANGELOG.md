@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-08 — Native dependency consent and duplicate-safe autostart
+
+- Offer systemd user-service autostart during interactive installation only after checking for an existing enabled service or recognized desktop autostart entry.
+- Preserve an already enabled selected user service; refuse a conflicting alternate startup mechanism instead of creating a duplicate.
+- Ask explicit permission before installing missing native keyboard libraries. Prefer user-local Homebrew on rpm-ostree hosts when compatible systemd integration is available; clearly warn before any package layering fallback.
+- Add a backed-up systemd environment drop-in when an existing enabled service needs user-local native libraries, without replacing its unit.
+- Extend tests for enabled services and desktop autostart, and add a GitHub Actions regression workflow.
+
+
 ## 2026-11-08 — Separate installer responsibilities
 
 - Keep the Wayland installer limited to mouse/keyboard input. Remove capture-helper
