@@ -320,6 +320,36 @@ exec /usr/bin/cp "$@"
         self.restore(self.backup())
         self.assertFalse(unit.exists())
 
+    def test_broken_screen_helpers_are_outside_wayland_installation_scope(self):
+        marker = self.base / 'screen-helper-was-executed'
+        helper = self.base / 'broken-screen-python'
+        helper.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 1\n')
+        helper.chmod(0o755)
+        originals = {}
+        for name, script in [('Bazzite Screen', 'bazzite_screen_streamer.py'),
+                             ('KDE Screen Remote', 'kde_screen_remote_streamer.py')]:
+            folder = self.remotes / 'Custom' / name
+            folder.mkdir(parents=True)
+            launcher = folder / 'remote.lua'
+            launcher.write_text('local python_bin = "' + str(helper) + '";\n')
+            (folder / script).write_text('# preserve capture code\n')
+            originals[launcher] = launcher.read_bytes()
+        self.run_install('--keyboard', '--no-restart')
+        self.assertFalse(marker.exists())
+        for path, content in originals.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertNotIn('Custom/', (self.backup() / 'manifest.tsv').read_text())
+
+    def test_wayland_restore_preserves_independent_screen_changes(self):
+        folder = self.remotes / 'Custom/Bazzite Screen'
+        folder.mkdir(parents=True)
+        launcher = folder / 'remote.lua'
+        launcher.write_text('-- original screen launcher\n')
+        self.run_install('--keyboard', '--no-restart')
+        launcher.write_text('-- independently updated screen launcher\n')
+        self.restore(self.backup())
+        self.assertEqual(launcher.read_text(), '-- independently updated screen launcher\n')
+
     def standalone(self, unsafe=None):
         directory = self.base / 'standalone'
         directory.mkdir()
@@ -394,82 +424,12 @@ exit 1
         self.run_install('--mouse-only', '--no-restart', success=False)
         self.assertEqual(list(temporary.iterdir()), [])
 
-    def screens(self, healthy=True):
-        old = self.base / 'old-python'
-        old.write_text('#!/bin/sh\nexit 1\n'); old.chmod(0o755)
-        new = self.base / 'current-python'
-        new.write_text('#!/bin/sh\nexit 0\n'); new.chmod(0o755)
-        self.env['TEST_SCREEN_PYTHON'] = str(new) if healthy else 'none'
-        # Keep helper availability deterministic; never run a host capture helper.
-        self.script('timeout', '#!/bin/bash\n[[ $2 == "$TEST_SCREEN_PYTHON" ]]\n')
-        desktop = self.home / '.local/share/applications/org.kdescreenremote.helper.desktop'
-        desktop.parent.mkdir(parents=True)
-        desktop.write_text('[Desktop Entry]\nExec=' + str(new) + '\n'
-                           'X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2\n')
-        paths = []
-        for name, helper, script in (
-            ('Bazzite Screen', old, 'bazzite_screen_streamer.py'),
-            ('KDE Screen Remote', new, 'kde_screen_remote_streamer.py')
-        ):
-            directory = self.remotes / 'Custom' / name
-            directory.mkdir(parents=True)
-            launcher = directory / 'remote.lua'
-            launcher.write_text('local python_bin = "' + str(helper) + '";\n-- keep controls\n')
-            (directory / script).write_text('# screen capture: preserve\n')
-            paths.append(launcher)
-        return paths, old, new
 
-    def test_screen_launcher_repair_is_backed_up_and_restorable(self):
-        paths, old, new = self.screens()
-        original = paths[0].read_bytes()
-        self.run_install('--keyboard', '--no-restart')
-        self.assertIn(str(new), paths[0].read_text())
-        self.assertIn('-- keep controls', paths[0].read_text())
-        self.assertEqual(paths[1].read_text(), 'local python_bin = "' + str(new) + '";\n-- keep controls\n')
-        self.assertEqual((paths[0].parent / 'bazzite_screen_streamer.py').read_text(), '# screen capture: preserve\n')
-        self.restore(self.backup())
-        self.assertEqual(paths[0].read_bytes(), original)
 
-    def test_screen_preflight_plans_without_modifying_custom_remote(self):
-        paths, _, _ = self.screens()
-        original = paths[0].read_bytes()
-        result = self.run_install('--mouse-only', '--check')
-        self.assertIn('Repair screen launcher after backup:', result.stdout)
-        self.assertEqual(paths[0].read_bytes(), original)
-        self.assertFalse((self.base / 'backups').exists())
 
-    def test_unavailable_screen_helpers_abort_before_any_changes(self):
-        paths, _, _ = self.screens(healthy=False)
-        original = paths[0].read_bytes()
-        result = self.run_install('--keyboard', '--no-restart', success=False)
-        self.assertIn('Screen helper is unusable', result.stderr)
-        self.assertFalse((self.base / 'backups').exists())
-        self.assertEqual(paths[0].read_bytes(), original)
 
-    def test_screen_helpers_can_be_preserved_explicitly_for_offline_staging(self):
-        paths, _, _ = self.screens(healthy=False)
-        original = paths[0].read_bytes()
-        self.run_install('--keyboard', '--keep-screen-helpers', '--no-restart')
-        self.assertEqual(paths[0].read_bytes(), original)
 
-    def test_screen_copy_failure_rolls_back_overlay_and_custom_launcher(self):
-        paths, _, _ = self.screens()
-        original = paths[0].read_bytes()
-        self.script('cp', '''#!/bin/bash
-if [[ $1 == -- && $2 == */0.lua ]]; then exit 77; fi
-exec /usr/bin/cp "$@"
-''')
-        self.run_install('--keyboard', '--no-restart', success=False)
-        self.assertEqual(paths[0].read_bytes(), original)
-        self.assertFalse(self.keyboard_path('wayland_ffi.lua').exists())
 
-    def test_screen_candidate_requires_screenshot_authorization(self):
-        paths, _, _ = self.screens()
-        (self.home / '.local/share/applications/org.kdescreenremote.helper.desktop').unlink()
-        original = paths[0].read_bytes()
-        self.run_install('--keyboard', '--no-restart', success=False)
-        self.assertEqual(paths[0].read_bytes(), original)
-        self.assertFalse((self.base / 'backups').exists())
 
 
 if __name__ == '__main__':
