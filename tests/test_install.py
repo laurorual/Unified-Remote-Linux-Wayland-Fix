@@ -345,6 +345,22 @@ exec /usr/bin/cp "$@"
         self.assertEqual(unit.read_text(), '[Unit]\nDescription=Custom existing autostart\n')
         self.assertNotIn('service/unit', (self.backup() / 'manifest.tsv').read_text())
 
+    def test_existing_enabled_service_accepts_reversible_private_library_dropin(self):
+        unit = self.home / '.config/systemd/user/unified-remote.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Unit]\nDescription=Pre-existing user service\n')
+        private = self.base / 'native libs'
+        private.mkdir()
+        self.env['TEST_ENABLED'] = '1'
+        self.run_install('--mouse-only', '--library-dir', str(private), '--no-restart')
+        dropin = unit.parent / 'unified-remote.service.d/50-unified-remote-wayland-fix.conf'
+        self.assertTrue(dropin.exists())
+        self.assertIn(str(private), dropin.read_text())
+        self.assertEqual(unit.read_text(), '[Unit]\nDescription=Pre-existing user service\n')
+        self.restore(self.backup())
+        self.assertFalse(dropin.exists())
+        self.assertEqual(unit.read_text(), '[Unit]\nDescription=Pre-existing user service\n')
+
     def test_other_enabled_unit_prevents_duplicate_service(self):
         self.env['TEST_OTHER_UNIT'] = 'another-unified-remote.service'
         self.env['TEST_OTHER_EXEC'] = str(self.binary)
