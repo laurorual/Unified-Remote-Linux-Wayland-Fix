@@ -136,6 +136,11 @@ if [[ -z $keyboard ]]; then
     elif (( yes )); then keyboard=0;
     else die 'Specify --keyboard or --mouse-only for noninteractive use'; fi
 fi
+# --yes never silently enables a user service.
+if (( ! install_service && ! yes && ! check )) && [[ -t 0 ]]; then
+    read -r -p 'Configure automatic startup via a systemd user service? [y/N] ' answer || answer=n
+    case $answer in y|Y|yes|YES) install_service=1;; esac
+fi
 if [[ -n $library_dir ]]; then
     library_dir=$(expand_path "$library_dir")
     [[ -d $library_dir ]] || die '--library-dir must be an existing directory'
@@ -149,6 +154,107 @@ has_owner() {
     command -v busctl >/dev/null || return 2
     [[ $(busctl --user --timeout=2s call org.freedesktop.DBus /org/freedesktop/DBus \
         org.freedesktop.DBus NameHasOwner s "$1" 2>/dev/null) == 'b true' ]]
+}
+# Native FFI libraries are loaded by urserver, not by Python.
+native_lib_present() {
+    local soname=$1 dir
+    if [[ -n $library_dir && -f $library_dir/$soname ]]; then return 0; fi
+    for dir in /usr/lib64 /usr/lib /usr/lib/x86_64-linux-gnu /lib64 /lib /lib/x86_64-linux-gnu; do
+        [[ -f $dir/$soname ]] && return 0
+    done
+    if command -v ldconfig >/dev/null; then
+        ldconfig -p 2>/dev/null | grep -Fq -- "$soname " && return 0
+    fi
+    return 1
+}
+confirm_dependency_change() {
+    local message=$1 answer
+    warn "$message"
+    # --yes only approves the installation plan, not package or system changes.
+    [[ -t 0 ]] || die 'Missing native libraries; rerun interactively to approve dependency installation'
+    read -r -p 'Install these missing dependencies? [y/N] ' answer || answer=n
+    case $answer in y|Y|yes|YES) :;; *) die 'Dependency installation declined; no packages were installed';; esac
+}
+as_root() {
+    if (( EUID == 0 )); then "$@"
+    else command -v sudo >/dev/null || die 'sudo is required for system package installation'; sudo "$@"
+    fi
+}
+ensure_native_libraries() {
+    (( keyboard )) || return 0
+    local soname formula package manager='' immutable=0 index prefix candidate
+    local -a missing=() formulas=() packages=()
+    for soname in libxkbcommon.so.0 libdbus-1.so.3 libevdev.so.2; do
+        native_lib_present "$soname" || missing+=("$soname")
+    done
+    (( ${#missing[@]} )) || return 0
+    warn "Missing native keyboard libraries: ${missing[*]}"
+    (( ! check )) || die 'Dependency check failed; --check never installs packages'
+
+    if [[ -f /run/ostree-booted ]] && command -v rpm-ostree >/dev/null; then
+        immutable=1; manager=rpm-ostree
+    elif command -v dnf >/dev/null; then manager=dnf
+    elif command -v apt-get >/dev/null; then manager=apt-get
+    elif command -v pacman >/dev/null; then manager=pacman
+    else die 'Unsupported package manager. Install the missing libraries manually or use --library-dir'; fi
+
+    # Prefer isolated user-local Homebrew dependencies over rpm-ostree on immutable systems.
+    # The generated service records the library prefix; a non-systemd launcher must be configured manually.
+    if (( immutable && install_service )) && command -v brew >/dev/null; then
+        for soname in "${missing[@]}"; do
+            case $soname in
+                libxkbcommon.so.0) formula=libxkbcommon;;
+                libdbus-1.so.3) formula=dbus;;
+                libevdev.so.2) formula=libevdev;;
+            esac
+            formulas+=("$formula")
+        done
+        confirm_dependency_change "Immutable host: install ${formulas[*]} using user-local Homebrew (no rpm-ostree) and configure the systemd service to load them."
+        brew install "${formulas[@]}"
+        local private_dir=${XDG_DATA_HOME:-$HOME/.local/share}/unified-remote-wayland-fix/native-libs
+        mkdir -p -- "$private_dir"
+        for index in "${!missing[@]}"; do
+            soname=${missing[index]}; formula=${formulas[index]}
+            prefix=$(brew --prefix "$formula")
+            candidate="$prefix/lib/$soname"
+            [[ -f $candidate ]] || die "Homebrew did not supply $candidate"
+            [[ ! -e $private_dir/$soname || -L $private_dir/$soname ]] ||
+                die "Refusing to replace user file: $private_dir/$soname"
+            ln -sfn -- "$candidate" "$private_dir/$soname"
+        done
+        library_dir="$private_dir"
+        export LD_LIBRARY_PATH="$library_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    else
+        for soname in "${missing[@]}"; do
+            case $manager:$soname in
+                rpm-ostree:libxkbcommon.so.0|dnf:libxkbcommon.so.0) package=libxkbcommon;;
+                rpm-ostree:libdbus-1.so.3|dnf:libdbus-1.so.3) package=dbus-libs;;
+                rpm-ostree:libevdev.so.2|dnf:libevdev.so.2) package=libevdev;;
+                apt-get:libxkbcommon.so.0) package=libxkbcommon0;;
+                apt-get:libdbus-1.so.3) package=libdbus-1-3;;
+                apt-get:libevdev.so.2) package=libevdev2;;
+                pacman:libxkbcommon.so.0) package=libxkbcommon;;
+                pacman:libdbus-1.so.3) package=dbus;;
+                pacman:libevdev.so.2) package=libevdev;;
+            esac
+            packages+=("$package")
+        done
+        if (( immutable )); then
+            confirm_dependency_change "Homebrew+systemd integration is unavailable or not selected. rpm-ostree must LAYER ${packages[*]} into the immutable system and may require a reboot."
+        else
+            confirm_dependency_change "Install ${packages[*]} with $manager (system package manager)."
+        fi
+        case $manager in
+            rpm-ostree) as_root rpm-ostree install --apply-live "${packages[@]}";;
+            dnf) as_root dnf install -y "${packages[@]}";;
+            apt-get) as_root apt-get update; as_root apt-get install -y "${packages[@]}";;
+            pacman) as_root pacman -S --needed --noconfirm "${packages[@]}";;
+        esac
+    fi
+    for soname in "${missing[@]}"; do
+        native_lib_present "$soname" ||
+            die "$soname is still unavailable. Reboot if needed and rerun the installer."
+    done
 }
 check_runtime() {
     [[ $(uname -s) == Linux ]] || die 'This fix is for Linux'
@@ -185,7 +291,12 @@ check_runtime() {
     fi
     if command -v file >/dev/null; then log "Server architecture: $(LC_ALL=C file -Lb -- "$server_dir/urserver")"; fi
 }
-if (( skip_checks )); then warn 'Runtime/session checks skipped; installation alone does not prove compatibility'; else check_runtime; fi
+if (( skip_checks )); then
+    warn 'Runtime/session checks skipped; installation alone does not prove compatibility'
+else
+    ensure_native_libraries
+    check_runtime
+fi
 
 # Sources and destination keys are parallel arrays. Keyboard-free legacy Input keeps native text.
 declare -a sources=() keys=() obsolete=()
