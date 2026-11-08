@@ -353,6 +353,13 @@ check_runtime() {
 if (( skip_checks )); then
     warn 'Runtime/session checks skipped; installation alone does not prove compatibility'
 else
+    # Reject incompatible sessions and unavailable /dev/uinput before installing any packages.
+    [[ $(uname -s) == Linux ]] || die 'This fix is for Linux'
+    [[ -c /dev/uinput && -w /dev/uinput ]] ||
+        die 'This user cannot write /dev/uinput; configure input permissions before installing dependencies (see README)'
+    if (( keyboard )) && [[ ${XDG_SESSION_TYPE:-wayland} != wayland ]]; then
+        die 'Keyboard input requires a KDE Plasma Wayland session'
+    fi
     ensure_native_libraries
     check_runtime
 fi
