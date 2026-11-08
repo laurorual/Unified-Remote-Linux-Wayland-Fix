@@ -200,6 +200,11 @@ if [[ -n $library_dir ]]; then
     [[ -d $library_dir ]] || die '--library-dir must be an existing directory'
     library_dir=$(realpath -e -- "$library_dir")
     export LD_LIBRARY_PATH="$library_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    if [[ $existing_startup_type == selected-service ]] && (( ! install_service )); then
+        # An explicitly supplied private library path must survive service restarts.
+        # Add only an independently backed-up environment drop-in.
+        install_dropin=1
+    fi
 fi
 service_file=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$service
 clean_path "$service_file"
