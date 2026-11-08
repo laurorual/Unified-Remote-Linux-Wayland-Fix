@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install only the mouse/keyboard overlay. No packages, ACLs, groups or layouts are changed.
+# Install mouse/keyboard fixes. Host permission/package changes require explicit consent.
 set -Eeuo pipefail
 (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || { printf '%s\n' 'Bash 4.4 or newer is required.' >&2; exit 1; }
 SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -19,7 +19,7 @@ Usage: ./install.sh [options]
   --keyboard            Install the optional KDE Plasma Wayland keyboard fix.
   --mouse-only          Install mouse fixes; preserve an already installed keyboard fix.
   --check               Show the plan and check requirements, without changing files.
-  --skip-checks         Skip Core runtime/session checks (offline/test use).
+  --skip-checks         Skip runtime/session and uinput permission checks (offline/test only).
   --backup-dir PATH     Parent directory for a unique, private installation backup.
   --library-dir PATH    Optional private native libraries; see README before using.
   --install-service     Generate and enable a user service for this server's actual path.
@@ -30,7 +30,7 @@ Usage: ./install.sh [options]
   --keep-legacy-files   Do not remove retired helper files/caches or stop old workers.
   --yes                 Accept the plan; without a mode, select mouse-only.
   -h, --help            Show this help.
-Run in the desktop user's host terminal, without sudo. No packages are installed or removed.
+Run in the desktop user's host terminal, without sudo. Host changes require separate consent.
 HELP
 }
 need_value() { (( $# >= 2 )) && [[ -n $2 ]] || die "$1 requires a value"; }
@@ -65,7 +65,8 @@ if [[ -n ${SUDO_USER:-} && $EUID == 0 ]]; then die 'Run as your desktop user, wi
 # A downloaded install.sh can bootstrap a coherent source snapshot without git.
 # Run its matching installer as a child, keeping the temporary files until it exits.
 if [[ ! -f $SOURCE_DIR/remotes/Unified/Core/Keyboard/wayland_ffi.lua ||
-      ! -f $SOURCE_DIR/variants/mouse-only/Unified/Core/Input/remote.lua ]]; then
+      ! -f $SOURCE_DIR/variants/mouse-only/Unified/Core/Input/remote.lua ||
+      ! -f $SOURCE_DIR/scripts/uinput.sh ]]; then
     command -v curl >/dev/null || die 'curl is required when running the standalone installer'
     command -v tar >/dev/null || die 'tar is required when running the standalone installer'
     download_dir=$(mktemp -d)
@@ -84,12 +85,15 @@ if [[ ! -f $SOURCE_DIR/remotes/Unified/Core/Keyboard/wayland_ffi.lua ||
     tar -xzf "$download_dir/source.tar.gz" --strip-components=1 --no-same-owner \
         --no-same-permissions -C "$download_dir/source"
     for required in install.sh remotes/Unified/Core/Keyboard/wayland_ffi.lua \
-                    variants/mouse-only/Unified/Core/Input/remote.lua; do
+                    variants/mouse-only/Unified/Core/Input/remote.lua scripts/uinput.sh; do
         [[ -f $download_dir/source/$required ]] || die "Source archive is missing $required"
     done
     bash "$download_dir/source/install.sh" "${original_args[@]}"
     exit 0
 fi
+
+# shellcheck source=scripts/uinput.sh
+source "$SOURCE_DIR/scripts/uinput.sh"
 
 # Discover the executable, not a fixed English Downloads path. Never eval a service command.
 declare -a candidates=()
@@ -358,13 +362,12 @@ check_runtime() {
 if (( skip_checks )); then
     warn 'Runtime/session checks skipped; installation alone does not prove compatibility'
 else
-    # Reject incompatible sessions and unavailable /dev/uinput before installing any packages.
+    # Validate the desktop before asking for privileged host changes.
     [[ $(uname -s) == Linux ]] || die 'This fix is for Linux'
-    [[ -c /dev/uinput && -w /dev/uinput ]] ||
-        die 'This user cannot write /dev/uinput; configure input permissions before installing dependencies (see README)'
     if (( keyboard )) && [[ ${XDG_SESSION_TYPE:-wayland} != wayland ]]; then
         die 'Keyboard input requires a KDE Plasma Wayland session'
     fi
+    ensure_uinput_access
     ensure_native_libraries
     check_runtime
 fi
