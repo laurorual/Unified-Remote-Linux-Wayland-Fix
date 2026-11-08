@@ -136,8 +136,62 @@ if [[ -z $keyboard ]]; then
     elif (( yes )); then keyboard=0;
     else die 'Specify --keyboard or --mouse-only for noninteractive use'; fi
 fi
-# --yes never silently enables a user service.
-if (( ! install_service && ! yes && ! check )) && [[ -t 0 ]]; then
+# Check user-service and XDG autostart registration before offering a new one.
+# These checks are conservative: never overwrite another startup mechanism.
+existing_startup='' existing_startup_type=''
+detect_existing_startup() {
+    local unit source line desktop_dir entry
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl --user is-enabled --quiet "$service" 2>/dev/null; then
+            existing_startup="$service"; existing_startup_type=selected-service
+            return 0
+        fi
+        # An enabled unit under another name must not be duplicated.
+        while read -r unit _; do
+            [[ $unit == *.service && $unit != "$service" ]] || continue
+            source=$(systemctl --user cat "$unit" 2>/dev/null || true)
+            while IFS= read -r line; do
+                [[ $line =~ ^[[:space:]]*ExecStart[[:space:]]*= ]] || continue
+                if [[ $line == *"$server_dir/urserver"* ]]; then
+                    existing_startup="$unit"; existing_startup_type=other-service
+                    return 0
+                fi
+            done <<< "$source"
+        done < <(systemctl --user list-unit-files --type=service --state=enabled --no-legend --no-pager 2>/dev/null || true)
+    fi
+    local -a desktop_dirs=(
+        "${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+        "$HOME/.config/autostart"
+        /etc/xdg/autostart
+    )
+    for desktop_dir in "${desktop_dirs[@]}"; do
+        [[ -d $desktop_dir ]] || continue
+        for entry in "$desktop_dir"/*.desktop; do
+            [[ -f $entry ]] || continue
+            grep -Eiq '^[[:space:]]*Hidden[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$entry" && continue
+            while IFS= read -r line; do
+                [[ $line =~ ^[[:space:]]*Exec[[:space:]]*= ]] || continue
+                if [[ $line == *"$server_dir/urserver"* ]]; then
+                    existing_startup="$entry"; existing_startup_type=desktop
+                    return 0
+                fi
+            done < "$entry"
+        done
+    done
+    return 1
+}
+detect_existing_startup || true
+if [[ -n $existing_startup ]]; then
+    log "Existing automatic startup detected: $existing_startup"
+    if (( install_service )); then
+        if [[ $existing_startup_type == selected-service ]]; then
+            log "The selected systemd service is already enabled; preserving it instead of creating/replacing a unit."
+            install_service=0
+        else
+            die "Automatic startup already uses $existing_startup. Disable that entry before requesting --install-service to avoid duplicates."
+        fi
+    fi
+elif (( ! install_service && ! yes && ! check )) && [[ -t 0 ]]; then
     read -r -p 'Configure automatic startup via a systemd user service? [y/N] ' answer || answer=n
     case $answer in y|Y|yes|YES) install_service=1;; esac
 fi
