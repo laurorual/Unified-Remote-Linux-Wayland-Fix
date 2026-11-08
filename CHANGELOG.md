@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-08 — Opt-in /dev/uinput permissions
+
+- Add a dedicated, consent-gated `/dev/uinput` setup in `install.sh`, without using rpm-ostree or granting world-writable device permissions.
+- Configure only the current desktop user through a dedicated `unified-remote-uinput` group and a narrowly scoped udev rule (`MODE=0660`), never the broad `input` group.
+- Load the `uinput` kernel module and persist module loading only if the device is missing.
+- Preserve working permissions, refuse conflicting existing managed rules/files, and never modify host permissions when consent is declined or `--check` is used.
+- Explain the need to fully log out and in after a group change, then rerun the installer. Keep the remote overlay unchanged until access is available.
+- Add isolated, mocked regression tests for no-op, dry-run, consent, conflicts, secure rule contents, module setup and session refresh.
+
+
 ## 2026-11-08 — Native dependency consent and duplicate-safe autostart
 
 - Offer systemd user-service autostart during interactive installation only after checking for an existing enabled service or recognized desktop autostart entry.
