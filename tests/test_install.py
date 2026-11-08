@@ -215,8 +215,16 @@ case " $* " in *" -f "*) printf '%s\\n' "$TEST_PGREP_PID";; *) exit 1;; esac
         self.assertFalse((self.base / 'backups').exists())
 
     def test_auto_restart_requires_the_exact_server_executable(self):
-        shutil.copy2('/usr/bin/sleep', self.binary)
-        process = subprocess.Popen([str(self.binary), '60'])
+        compiler = shutil.which('cc')
+        if compiler is None:
+            self.skipTest('A C compiler is required for this executable identity test')
+        build = subprocess.run(
+            [compiler, '-x', 'c', '-o', str(self.binary), '-'],
+            input='#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n',
+            capture_output=True, text=True,
+        )
+        self.assertEqual(build.returncode, 0, build.stderr)
+        process = subprocess.Popen([str(self.binary)])
         self.addCleanup(lambda: (process.terminate(), process.wait()) if process.poll() is None else None)
         self.env.update(TEST_ACTIVE='1', TEST_MAINPID=str(process.pid))
         self.run_install('--mouse-only')
@@ -330,11 +338,11 @@ exec /usr/bin/cp "$@"
     def test_already_enabled_systemd_service_is_preserved(self):
         unit = self.home / '.config/systemd/user/unified-remote.service'
         unit.parent.mkdir(parents=True)
-        unit.write_text('[Unit]\\nDescription=Custom existing autostart\\n')
+        unit.write_text('[Unit]\nDescription=Custom existing autostart\n')
         self.env['TEST_ENABLED'] = '1'
         result = self.run_install('--mouse-only', '--install-service', '--no-restart')
         self.assertIn('already enabled', result.stdout)
-        self.assertEqual(unit.read_text(), '[Unit]\\nDescription=Custom existing autostart\\n')
+        self.assertEqual(unit.read_text(), '[Unit]\nDescription=Custom existing autostart\n')
         self.assertNotIn('service/unit', (self.backup() / 'manifest.tsv').read_text())
 
     def test_other_enabled_unit_prevents_duplicate_service(self):
@@ -347,7 +355,7 @@ exec /usr/bin/cp "$@"
     def test_desktop_autostart_prevents_duplicate_service(self):
         autostart = self.home / '.config/autostart'
         autostart.mkdir(parents=True)
-        (autostart / 'urserver.desktop').write_text('[Desktop Entry]\\nType=Application\\nExec=' + str(self.binary) + '\\n')
+        (autostart / 'urserver.desktop').write_text('[Desktop Entry]\nType=Application\nExec=' + str(self.binary) + '\n')
         result = self.run_install('--mouse-only', '--install-service', '--no-restart', success=False)
         self.assertIn('Automatic startup already uses', result.stderr)
         self.assertFalse((self.base / 'backups').exists())
@@ -355,7 +363,7 @@ exec /usr/bin/cp "$@"
     def test_hidden_desktop_autostart_does_not_block_service(self):
         autostart = self.home / '.config/autostart'
         autostart.mkdir(parents=True)
-        (autostart / 'disabled.desktop').write_text('[Desktop Entry]\\nHidden=true\\nExec=' + str(self.binary) + '\\n')
+        (autostart / 'disabled.desktop').write_text('[Desktop Entry]\nHidden=true\nExec=' + str(self.binary) + '\n')
         self.run_install('--mouse-only', '--install-service', '--no-restart')
         self.assertTrue((self.home / '.config/systemd/user/unified-remote.service').is_file())
 
