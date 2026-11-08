@@ -1,10 +1,12 @@
 """Installer integration checks: fake installations/services in temporary directories."""
 import fcntl
+import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -18,6 +20,7 @@ class InstallerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
+        self.installer = INSTALLER
         self.home = self.base / 'home'
         self.home.mkdir()
         self.server = self.home / 'UR server with spaces'
@@ -65,7 +68,7 @@ case " $* " in *" -f "*) printf '%s\\n' "$TEST_PGREP_PID";; *) exit 1;; esac
         path.chmod(0o755)
 
     def run_install(self, *options, success=True, detect=False, runtime_checks=False):
-        args = ['bash', str(INSTALLER), '--yes', '--backup-dir', str(self.base / 'backups')]
+        args = ['bash', str(self.installer), '--yes', '--backup-dir', str(self.base / 'backups')]
         if not detect:
             args.extend(['--server-dir', str(self.server)])
         if not runtime_checks:
@@ -316,6 +319,157 @@ exec /usr/bin/cp "$@"
             self.assertEqual(result.returncode, 0, result.stderr)
         self.restore(self.backup())
         self.assertFalse(unit.exists())
+
+    def standalone(self, unsafe=None):
+        directory = self.base / 'standalone'
+        directory.mkdir()
+        self.installer = directory / 'install.sh'
+        shutil.copy2(INSTALLER, self.installer)
+        archive = self.base / 'source.tar.gz'
+        with tarfile.open(archive, 'w:gz') as bundle:
+            if unsafe:
+                entry = tarfile.TarInfo(unsafe)
+                if unsafe.endswith('link'):
+                    entry.type = tarfile.SYMTYPE
+                    entry.linkname = '/tmp'
+                    bundle.addfile(entry)
+                else:
+                    entry.size = 1
+                    bundle.addfile(entry, io.BytesIO(b'x'))
+            else:
+                bundle.add(ROOT, arcname='Wayland-Fix-main',
+                           filter=lambda item: None if '__pycache__' in item.name else item)
+        temporary = self.base / 'downloads'
+        temporary.mkdir()
+        self.env.update(TEST_ARCHIVE=str(archive), TMPDIR=str(temporary),
+                        TEST_CURL_RECORD=str(self.base / 'curl-calls'))
+        self.script('curl', '''#!/bin/bash
+printf '%s\\n' "$*" >> "$TEST_CURL_RECORD"
+while (( $# )); do
+    if [[ $1 == --output ]]; then cp -- "$TEST_ARCHIVE" "$2"; exit; fi
+    shift
+done
+exit 1
+''')
+        return temporary
+
+    def test_standalone_downloads_snapshot_and_preserves_arguments(self):
+        temporary = self.standalone()
+        self.run_install('--keyboard', '--no-restart')
+        self.assertIn('wayland_ffi.lua', (self.remotes / 'Unified/Core/Input/remote.lua').read_text())
+        self.assertIn('codeload.github.com/laurorual/Unified-Remote-Linux-Wayland-Fix',
+                      Path(self.env['TEST_CURL_RECORD']).read_text())
+        self.assertEqual(list(temporary.iterdir()), [])
+
+    def test_standalone_check_does_not_mutate_installation(self):
+        temporary = self.standalone()
+        self.run_install('--keyboard', '--check')
+        self.assertFalse((self.base / 'backups').exists())
+        self.assertFalse(self.keyboard_path('wayland_ffi.lua').exists())
+        self.assertEqual(list(temporary.iterdir()), [])
+
+    def test_standalone_help_does_not_download(self):
+        self.standalone()
+        self.run_install('--help')
+        self.assertFalse(Path(self.env['TEST_CURL_RECORD']).exists())
+
+    def test_standalone_download_failure_preserves_installation(self):
+        temporary = self.standalone()
+        self.script('curl', '#!/bin/bash\nexit 22\n')
+        self.run_install('--keyboard', '--no-restart', success=False)
+        self.assertFalse((self.base / 'backups').exists())
+        self.assertFalse(self.keyboard_path('wayland_ffi.lua').exists())
+        self.assertEqual(list(temporary.iterdir()), [])
+
+    def test_standalone_rejects_archive_traversal_and_links(self):
+        temporary = self.standalone(unsafe='repository/../escape')
+        self.run_install('--mouse-only', '--no-restart', success=False)
+        self.assertEqual(list(temporary.iterdir()), [])
+        self.assertFalse((self.base / 'backups').exists())
+        with tarfile.open(self.env['TEST_ARCHIVE'], 'w:gz') as bundle:
+            entry = tarfile.TarInfo('repository/link')
+            entry.type = tarfile.SYMTYPE
+            entry.linkname = '/tmp'
+            bundle.addfile(entry)
+        self.run_install('--mouse-only', '--no-restart', success=False)
+        self.assertEqual(list(temporary.iterdir()), [])
+
+    def screens(self, healthy=True):
+        old = self.base / 'old-python'
+        old.write_text('#!/bin/sh\nexit 1\n'); old.chmod(0o755)
+        new = self.base / 'current-python'
+        new.write_text('#!/bin/sh\nexit 0\n'); new.chmod(0o755)
+        self.env['TEST_SCREEN_PYTHON'] = str(new) if healthy else 'none'
+        # Keep helper availability deterministic; never run a host capture helper.
+        self.script('timeout', '#!/bin/bash\n[[ $2 == "$TEST_SCREEN_PYTHON" ]]\n')
+        desktop = self.home / '.local/share/applications/org.kdescreenremote.helper.desktop'
+        desktop.parent.mkdir(parents=True)
+        desktop.write_text('[Desktop Entry]\nExec=' + str(new) + '\n'
+                           'X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2\n')
+        paths = []
+        for name, helper, script in (
+            ('Bazzite Screen', old, 'bazzite_screen_streamer.py'),
+            ('KDE Screen Remote', new, 'kde_screen_remote_streamer.py')
+        ):
+            directory = self.remotes / 'Custom' / name
+            directory.mkdir(parents=True)
+            launcher = directory / 'remote.lua'
+            launcher.write_text('local python_bin = "' + str(helper) + '";\n-- keep controls\n')
+            (directory / script).write_text('# screen capture: preserve\n')
+            paths.append(launcher)
+        return paths, old, new
+
+    def test_screen_launcher_repair_is_backed_up_and_restorable(self):
+        paths, old, new = self.screens()
+        original = paths[0].read_bytes()
+        self.run_install('--keyboard', '--no-restart')
+        self.assertIn(str(new), paths[0].read_text())
+        self.assertIn('-- keep controls', paths[0].read_text())
+        self.assertEqual(paths[1].read_text(), 'local python_bin = "' + str(new) + '";\n-- keep controls\n')
+        self.assertEqual((paths[0].parent / 'bazzite_screen_streamer.py').read_text(), '# screen capture: preserve\n')
+        self.restore(self.backup())
+        self.assertEqual(paths[0].read_bytes(), original)
+
+    def test_screen_preflight_plans_without_modifying_custom_remote(self):
+        paths, _, _ = self.screens()
+        original = paths[0].read_bytes()
+        result = self.run_install('--mouse-only', '--check')
+        self.assertIn('Repair screen launcher after backup:', result.stdout)
+        self.assertEqual(paths[0].read_bytes(), original)
+        self.assertFalse((self.base / 'backups').exists())
+
+    def test_unavailable_screen_helpers_abort_before_any_changes(self):
+        paths, _, _ = self.screens(healthy=False)
+        original = paths[0].read_bytes()
+        result = self.run_install('--keyboard', '--no-restart', success=False)
+        self.assertIn('Screen helper is unusable', result.stderr)
+        self.assertFalse((self.base / 'backups').exists())
+        self.assertEqual(paths[0].read_bytes(), original)
+
+    def test_screen_helpers_can_be_preserved_explicitly_for_offline_staging(self):
+        paths, _, _ = self.screens(healthy=False)
+        original = paths[0].read_bytes()
+        self.run_install('--keyboard', '--keep-screen-helpers', '--no-restart')
+        self.assertEqual(paths[0].read_bytes(), original)
+
+    def test_screen_copy_failure_rolls_back_overlay_and_custom_launcher(self):
+        paths, _, _ = self.screens()
+        original = paths[0].read_bytes()
+        self.script('cp', '''#!/bin/bash
+if [[ $1 == -- && $2 == */0.lua ]]; then exit 77; fi
+exec /usr/bin/cp "$@"
+''')
+        self.run_install('--keyboard', '--no-restart', success=False)
+        self.assertEqual(paths[0].read_bytes(), original)
+        self.assertFalse(self.keyboard_path('wayland_ffi.lua').exists())
+
+    def test_screen_candidate_requires_screenshot_authorization(self):
+        paths, _, _ = self.screens()
+        (self.home / '.local/share/applications/org.kdescreenremote.helper.desktop').unlink()
+        original = paths[0].read_bytes()
+        self.run_install('--keyboard', '--no-restart', success=False)
+        self.assertEqual(paths[0].read_bytes(), original)
+        self.assertFalse((self.base / 'backups').exists())
 
 
 if __name__ == '__main__':

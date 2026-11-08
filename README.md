@@ -9,21 +9,29 @@ The mouse fix can be installed independently on other Wayland desktops.
 
 ## Install or update
 
-Download this repository with **Code → Download ZIP**, extract it, and open a
-terminal in the extracted directory. Alternatively:
+Download and run only the installer as your desktop user, **without sudo**:
 
 ```bash
-git clone https://github.com/laurorual/Unified-Remote-Linux-Wayland-Fix.git
-cd Unified-Remote-Linux-Wayland-Fix
+curl -fsSL https://raw.githubusercontent.com/laurorual/Unified-Remote-Linux-Wayland-Fix/main/install.sh -o install.sh
+bash install.sh
 ```
 
-Run the interactive installer as your desktop user, **without sudo**:
+No clone or manual ZIP extraction is needed. The standalone script downloads a
+source snapshot into a temporary directory and runs the matching installer from
+that snapshot, preserving all your arguments and prompts. The temporary files
+are removed on success or failure. This download requires `curl` and `tar`;
+`--help` works without downloading anything.
+
+For example, install the keyboard fix directly with:
 
 ```bash
-./install.sh
+bash install.sh --keyboard --yes
 ```
 
-If ZIP extraction did not preserve executable permissions, use `bash install.sh` instead.
+You can still use **Code → Download ZIP** or clone the repository and run
+`bash install.sh` from its root. A complete local source tree needs no download.
+The examples below also work as `bash install.sh ...` when the executable bit
+was not preserved.
 
 It finds running/PATH installations and common directories, including the localized
 Downloads directory. If the location is ambiguous, it asks for the folder containing
@@ -69,6 +77,7 @@ Run `./install.sh --help` for all options.
 | `--service NAME.service` | Select a different user-service name. |
 | `--restart` / `--no-restart` | Explicitly restart the selected user service, or leave restart to you. |
 | `--keep-legacy-files` | Opt out of retiring obsolete helper files and workers. |
+| `--keep-screen-helpers` | Preserve screen launchers and skip their compatibility checks/repair, for example when staging offline. |
 | `--skip-checks` | Skip runtime checks for staging/offline use. |
 | `--yes` | Accept the displayed plan. With no keyboard mode, defaults to mouse-only. |
 
@@ -122,6 +131,35 @@ Olá, ação! ç ã é @ # $ % & * ( ) [ ] { } / ? + = € 🙂
 The mouse scripts call Unified Remote's own mouse API and add no Python or
 KDE-specific runtime requirement.
 
+### Compatibility with Bazzite Screen and KDE Screen Remote
+
+Screen capture still needs Python, dbus-python, Pillow and PyGObject even though
+the native keyboard no longer needs them. The installer does not remove those
+shared packages or delete screen scripts.
+
+Before changing files, it checks the literal `python_bin` launcher in the known
+`remotes/Custom/Bazzite Screen` and `remotes/Custom/KDE Screen Remote` folders.
+Each check is bounded to five seconds. A healthy launcher is left unchanged. If
+a copied Python no longer starts or cannot import the capture dependencies, it
+looks for another existing screen helper with those dependencies and the matching
+KWin authorization desktop entry. Only the launcher's interpreter path is
+repaired; its original file is covered by the same backup, checksums and restore
+transaction as the Core remotes.
+
+If no compatible authorized helper exists, installation stops **before changing
+any installed files or restarting the service**. Refresh the authorized Python
+copy using the [KDE Screen installer](https://github.com/laurorual/unified-remote-kde-screen#automatic-installation-or-update),
+then retry. This fix does not overwrite root-owned helpers or request sudo.
+`--check` shows a proposed launcher repair without applying it. To explicitly
+preserve custom launchers during offline staging, use `--keep-screen-helpers`;
+`--skip-checks` skips the Core runtime checks but does not bypass this screen guard.
+
+For example, `libpython3.14.so.1.0: cannot open shared object file` means an older
+copied capture interpreter still expects Python 3.14 while the host may now have
+Python 3.15. Removing the retired keyboard worker cannot refresh that separate
+screen helper. After a host Python upgrade, the screenshot helper copy must also
+be refreshed or replaced with a compatible, authorized copy.
+
 ### Optional keyboard fix
 
 - **KDE Plasma on Wayland** with KWin's keyboard-layout/input-device D-Bus interfaces.
@@ -139,8 +177,9 @@ KDE-specific runtime requirement.
   layout. Ordinary mapped characters work without clipboard paste; the installer
   warns if it cannot detect Klipper.
 
-**Python, python-evdev, dbus-python and wl-clipboard are no longer runtime
-requirements.** Python is used only to run the optional developer test scripts.
+**Python, python-evdev, dbus-python and wl-clipboard are no longer keyboard runtime
+requirements.** Python is also used by the optional developer tests and by
+separately installed screen-capture remotes, which keep their own dependencies.
 Do not install dependency packages just because they appear in an old tutorial:
 check what is already available first.
 
@@ -302,9 +341,14 @@ running/unrecognized server still needs a manual restart after restore.
   diagnostics must match the server; it is not a replacement for its embedded LuaJIT.
 - **Ordinary text works, emoji/euro does not:** verify Klipper is available and
   the focused application accepts Ctrl+V.
-- **Old Python errors after updating:** verify the selected remotes path, restart
-  the correct server, then reconnect the mobile remote. Already loaded Lua files
-  can keep referring to the previous implementation until restart.
+- **Old Python keyboard errors after updating:** verify the selected remotes path,
+  restart the correct server, then reconnect the mobile remote. Already loaded
+  Lua files can keep referring to the previous implementation until restart.
+- **Bazzite Screen preview is blank with a `libpython` error:** its copied capture
+  interpreter is incompatible with the host. Run `bash install.sh --mouse-only
+  --check` to inspect the proposed repair. If no compatible authorized helper is
+  available, refresh it with the KDE Screen installer and retry. The native
+  keyboard and screen capture have different runtime requirements.
 - **An application changes the clipboard or focus while typing:** retest with a
   simple focused editor; clipboard fallback follows the desktop's normal behavior.
 
@@ -320,6 +364,8 @@ bash -n install.sh
 The installer tests use temporary server trees and stub service commands, covering
 mouse-only and keyboard installs, separate/localized/quoted paths, legacy cleanup,
 worker isolation, rollback, checksums, service matching and unit-file validation.
+They also cover standalone downloads, argument forwarding, cleanup on failure,
+archive path/link rejection, and transactional screen-helper repair/restore.
 The keyboard tests require a standalone LuaJIT plus native libraries; they check
 Unicode, layouts, AltGr, configuration precedence and failure handling.
 
@@ -339,6 +385,24 @@ path to **0.18–0.20 s** with a native socket client, then **0.15 s** with dire
 These measurements exclude the phone/Wi-Fi and are not a cross-machine guarantee.
 
 ## Changelog
+
+### 2026-11-08 — Standalone installation and screen-helper compatibility
+
+- Allow a downloaded `install.sh` to fetch and use a matching source snapshot,
+  with argument forwarding, temporary-file cleanup and no git dependency.
+- Check Bazzite Screen/KDE Screen copied Python helpers before installing or
+  restarting; keep their capture dependencies separate from the retired keyboard
+  worker's requirements.
+- Repair a recognized launcher's broken interpreter path only when an existing,
+  compatible helper and its KWin authorization are available; back up and restore
+  that change with the rest of the installation.
+- Refuse installation before mutation when an installed screen helper is broken
+  and no suitable replacement exists. Add `--keep-screen-helpers` for intentional
+  offline staging without screen checks.
+- Verified the local failure was a copied Python 3.14 interpreter requiring the
+  missing `libpython3.14.so.1.0` on a Python 3.15 host; restored live capture using
+  the already installed and authorized Python 3.15 helper.
+- Preserve the direct LuaJIT/FFI keyboard backend and existing mouse behavior.
 
 ### 2026-11-06 — Direct Lua/FFI keyboard and automated installation
 

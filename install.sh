@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Install only this project's overlay. No packages, ACLs, groups or layouts are changed.
+# Install the overlay and check known screen launchers. No packages, ACLs,
+# groups or keyboard layouts are changed.
 set -Eeuo pipefail
 (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || { printf '%s\n' 'Bash 4.4 or newer is required.' >&2; exit 1; }
 SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+original_args=("$@")
 server_dir='' remotes_dir='' keyboard='' yes=0 check=0 skip_checks=0
-install_service=0 restart=auto cleanup=1 service=unified-remote.service library_dir=''
+install_service=0 restart=auto cleanup=1 service=unified-remote.service library_dir='' keep_screen_helpers=0
 backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/unified-remote-wayland-fix/backups
 backup='' service_file='' stopped=0 mutation=0
 log() { printf '%s\n' "$*"; }
@@ -18,7 +20,7 @@ Usage: ./install.sh [options]
   --keyboard            Install the optional KDE Plasma Wayland keyboard fix.
   --mouse-only          Install mouse fixes; preserve an already installed keyboard fix.
   --check               Show the plan and check requirements, without changing files.
-  --skip-checks         Stage files without runtime/session checks (offline/test use).
+  --skip-checks         Skip Core runtime/session checks (offline/test use).
   --backup-dir PATH     Parent directory for a unique, private installation backup.
   --library-dir PATH    Optional private native libraries; see README before using.
   --install-service     Generate and enable a user service for this server's actual path.
@@ -27,6 +29,7 @@ Usage: ./install.sh [options]
   --no-restart          Do not stop/start the server (restart it manually after installing).
                         Default: restart only an active service running this exact binary.
   --keep-legacy-files   Do not remove retired helper files/caches or stop old workers.
+  --keep-screen-helpers Preserve custom screen launchers; skip capture-helper checks/repair.
   --yes                 Accept the plan; without a mode, select mouse-only.
   -h, --help            Show this help.
 Run in the desktop user's host terminal, without sudo. No packages are installed or removed.
@@ -49,6 +52,7 @@ while (( $# )); do
         --restart) restart=yes; shift;;
         --no-restart) restart=no; shift;;
         --keep-legacy-files) cleanup=0; shift;;
+        --keep-screen-helpers) keep_screen_helpers=1; shift;;
         -h|--help) usage; exit 0;;
         *) die "Unknown option: $1 (use --help)";;
     esac
@@ -60,6 +64,36 @@ expand_path() { case $1 in '~') printf '%s' "$HOME";; '~/'*) printf '%s/%s' "$HO
 clean_path() { [[ $1 != *$'\n'* && $1 != *$'\r'* ]] || die 'Paths containing newlines are not supported'; }
 for path in "$server_dir" "$remotes_dir" "$backup_base" "$library_dir"; do clean_path "$path"; done
 if [[ -n ${SUDO_USER:-} && $EUID == 0 ]]; then die 'Run as your desktop user, without sudo; use a user-writable server copy'; fi
+
+# A downloaded install.sh can bootstrap a coherent source snapshot without git.
+# Run its matching installer as a child, keeping the temporary files until it exits.
+if [[ ! -f $SOURCE_DIR/remotes/Unified/Core/Keyboard/wayland_ffi.lua ||
+      ! -f $SOURCE_DIR/variants/mouse-only/Unified/Core/Input/remote.lua ||
+      ! -f $SOURCE_DIR/scripts/screen_helpers.sh ]]; then
+    command -v curl >/dev/null || die 'curl is required when running the standalone installer'
+    command -v tar >/dev/null || die 'tar is required when running the standalone installer'
+    download_dir=$(mktemp -d)
+    trap 'rm -rf -- "$download_dir"' EXIT
+    url='https://codeload.github.com/laurorual/Unified-Remote-Linux-Wayland-Fix/tar.gz/refs/heads/main'
+    log 'Downloading the current Wayland Fix source snapshot (no git clone required)...'
+    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+        --max-time 60 --output "$download_dir/source.tar.gz" "$url"
+    tar -tzf "$download_dir/source.tar.gz" > "$download_dir/entries"
+    awk 'BEGIN { valid=1 } /^\// { valid=0 } { n=split($0,a,"/"); for(i=1;i<=n;i++) if(a[i]=="..") valid=0 } END { exit !valid }' \
+        "$download_dir/entries" || die 'Unsafe source archive path'
+    tar -tvzf "$download_dir/source.tar.gz" > "$download_dir/types"
+    awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" { exit 1 }' \
+        "$download_dir/types" || die 'Source archive contains unsupported links or special files'
+    mkdir -- "$download_dir/source"
+    tar -xzf "$download_dir/source.tar.gz" --strip-components=1 --no-same-owner \
+        --no-same-permissions -C "$download_dir/source"
+    for required in install.sh scripts/screen_helpers.sh remotes/Unified/Core/Keyboard/wayland_ffi.lua \
+                    variants/mouse-only/Unified/Core/Input/remote.lua; do
+        [[ -f $download_dir/source/$required ]] || die "Source archive is missing $required"
+    done
+    bash "$download_dir/source/install.sh" "${original_args[@]}"
+    exit 0
+fi
 
 # Discover the executable, not a fixed English Downloads path. Never eval a service command.
 declare -a candidates=()
@@ -188,6 +222,14 @@ if (( cleanup )); then
         done
         shopt -u nullglob
     fi
+fi
+# Screen remotes still need Python even though the keyboard no longer does.
+# Only stage a launcher repair; the normal backup/rollback transaction applies it.
+screen_stage=''
+trap 'if [[ -n $screen_stage ]]; then rm -rf -- "$screen_stage"; fi' EXIT
+if (( ! keep_screen_helpers )); then
+    source "$SOURCE_DIR/scripts/screen_helpers.sh"
+    prepare_screen_helpers
 fi
 if (( install_service )); then keys+=(service/unit); sources+=(''); fi
 key_target() {
