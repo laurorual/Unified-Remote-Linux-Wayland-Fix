@@ -5,7 +5,7 @@ set -Eeuo pipefail
 SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 original_args=("$@")
 server_dir='' remotes_dir='' keyboard='' yes=0 check=0 skip_checks=0
-install_service=0 restart=auto cleanup=1 service=unified-remote.service library_dir=''
+install_service=0 install_dropin=0 restart=auto cleanup=1 service=unified-remote.service library_dir=''
 backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/unified-remote-wayland-fix/backups
 backup='' service_file='' stopped=0 mutation=0
 log() { printf '%s\n' "$*"; }
@@ -254,7 +254,8 @@ ensure_native_libraries() {
 
     # Prefer isolated user-local Homebrew dependencies over rpm-ostree on immutable systems.
     # The generated service records the library prefix; a non-systemd launcher must be configured manually.
-    if (( immutable && install_service )) && command -v brew >/dev/null; then
+    if (( immutable )) && command -v brew >/dev/null &&
+       { (( install_service )) || [[ $existing_startup_type == selected-service ]]; }; then
         for soname in "${missing[@]}"; do
             case $soname in
                 libxkbcommon.so.0) formula=libxkbcommon;;
@@ -278,6 +279,10 @@ ensure_native_libraries() {
         done
         library_dir="$private_dir"
         export LD_LIBRARY_PATH="$library_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        if (( ! install_service )); then
+            # Retain the existing enabled unit; add only a reversible environment drop-in.
+            install_dropin=1
+        fi
     else
         for soname in "${missing[@]}"; do
             case $manager:$soname in
@@ -385,8 +390,14 @@ if (( cleanup )); then
     fi
 fi
 if (( install_service )); then keys+=(service/unit); sources+=(''); fi
+if (( install_dropin )); then keys+=(service/dropin); sources+=(''); fi
 key_target() {
-    case $1 in remotes/*) printf '%s/%s' "$remotes_dir" "${1#remotes/}";; service/unit) printf '%s' "$service_file";; *) die 'Invalid installation key';; esac
+    case $1 in
+        remotes/*) printf '%s/%s' "$remotes_dir" "${1#remotes/}";;
+        service/unit) printf '%s' "$service_file";;
+        service/dropin) printf '%s.d/50-unified-remote-wayland-fix.conf' "$service_file";;
+        *) die 'Invalid installation key';;
+    esac
 }
 for key in "${keys[@]}" "${obsolete[@]}"; do
     target=$(key_target "$key")
@@ -463,7 +474,7 @@ done
 {
     printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
     printf 'remotes_dir=%q\nservice_file=%q\nservice=%q\nexpected_executable=%q\n' "$remotes_dir" "$service_file" "$service" "$(realpath -e -- "$server_dir/urserver")"
-    printf 'installed_service=%q\nservice_was_enabled=%q\n' "$install_service" "$service_was_enabled"
+    printf 'installed_service=%q\ninstall_dropin=%q\nservice_was_enabled=%q\n' "$install_service" "$install_dropin" "$service_was_enabled"
     cat <<'RESTORE'
 backup=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 (cd -- "$backup"; sha256sum --check SHA256SUMS)
@@ -484,6 +495,7 @@ while IFS=$'\t' read -r state key; do
     case $key in
         remotes/*) target=$remotes_dir/${key#remotes/};;
         service/unit) target=$service_file;;
+        service/dropin) target=$service_file.d/50-unified-remote-wayland-fix.conf;;
         *) printf '%s\n' 'Invalid backup entry' >&2; exit 1;;
     esac
     case $state in
@@ -492,9 +504,9 @@ while IFS=$'\t' read -r state key; do
         *) printf '%s\n' 'Invalid backup state' >&2; exit 1;;
     esac
 done < "$backup/manifest.tsv"
-if (( installed_service )); then
+if (( installed_service || install_dropin )); then
     systemctl --user daemon-reload
-    if [[ ! -f $service_file ]]; then systemctl --user disable "$service" 2>/dev/null || true; fi
+    if (( installed_service )) && [[ ! -f $service_file ]]; then systemctl --user disable "$service" 2>/dev/null || true; fi
 fi
 if (( restart )); then
     if systemctl --user cat "$service" >/dev/null 2>&1; then systemctl --user start "$service";
@@ -536,7 +548,13 @@ for index in "${!keys[@]}"; do
     key=${keys[index]}; target=$(key_target "$key")
     mkdir -p -- "${target%/*}"
     staged=$(mktemp -- "${target%/*}/.ur-fix-XXXXXX")
-    if [[ $key == service/unit ]]; then write_service > "$staged"; else cp -- "${sources[index]}" "$staged"; fi
+    if [[ $key == service/unit ]]; then
+        write_service > "$staged"
+    elif [[ $key == service/dropin ]]; then
+        printf '[Service]\nEnvironment="LD_LIBRARY_PATH=%s"\n' "$(unit_escape "$LD_LIBRARY_PATH")" > "$staged"
+    else
+        cp -- "${sources[index]}" "$staged"
+    fi
     chmod 644 "$staged"
     mv -f -- "$staged" "$target"
 done
@@ -572,10 +590,10 @@ if (( cleanup && retire_python )); then
         fi
     fi
 fi
-if (( install_service )); then
+if (( install_service || install_dropin )); then
     mkdir -p -- "$HOME/.urserver"
     systemctl --user daemon-reload
-    if (( ! service_was_enabled )); then systemctl --user enable "$service"; fi
+    if (( install_service && ! service_was_enabled )); then systemctl --user enable "$service"; fi
 fi
 if [[ $restart == yes ]]; then systemctl --user restart "$service"; stopped=0;
 else log 'Restart Unified Remote manually to load the changed remotes.'; fi
