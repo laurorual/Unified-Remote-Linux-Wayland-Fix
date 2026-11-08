@@ -66,5 +66,6 @@ python3 -m unittest discover -s tests -v
 bash -n install.sh
 ```
 
-Python and standalone LuaJIT are used by developer tests only.
+Developer tests use Python and standalone LuaJIT. Neither is required to run
+the installed mouse/keyboard remotes.
 See [CHANGELOG.md](CHANGELOG.md) for version history.
