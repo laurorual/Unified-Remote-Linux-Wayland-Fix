@@ -49,7 +49,14 @@ class InstallerTests(unittest.TestCase):
 printf '%s\\n' "$*" >> "$TEST_SERVICE_RECORD"
 case $2 in
  is-active) [[ $TEST_ACTIVE == 1 ]];;
- is-enabled) [[ $TEST_ENABLED == 1 ]];;
+ is-enabled) [[ $TEST_ENABLED == 1 && "${@: -1}" == "${TEST_ENABLED_UNIT:-unified-remote.service}" ]];;
+ list-unit-files)
+   [[ -n ${TEST_OTHER_UNIT:-} ]] && printf '%s enabled enabled\\n' "$TEST_OTHER_UNIT"
+   exit 0;;
+ cat)
+   if [[ "${@: -1}" == "${TEST_OTHER_UNIT:-}" && -n ${TEST_OTHER_UNIT:-} ]]; then
+      printf '[Service]\\nExecStart=%s\\n' "$TEST_OTHER_EXEC"
+   fi;;
  show) printf '%s\\n' "$TEST_MAINPID";;
  *) exit 0;;
 esac
@@ -319,6 +326,38 @@ exec /usr/bin/cp "$@"
             self.assertEqual(result.returncode, 0, result.stderr)
         self.restore(self.backup())
         self.assertFalse(unit.exists())
+
+    def test_already_enabled_systemd_service_is_preserved(self):
+        unit = self.home / '.config/systemd/user/unified-remote.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Unit]\\nDescription=Custom existing autostart\\n')
+        self.env['TEST_ENABLED'] = '1'
+        result = self.run_install('--mouse-only', '--install-service', '--no-restart')
+        self.assertIn('already enabled', result.stdout)
+        self.assertEqual(unit.read_text(), '[Unit]\\nDescription=Custom existing autostart\\n')
+        self.assertNotIn('service/unit', (self.backup() / 'manifest.tsv').read_text())
+
+    def test_other_enabled_unit_prevents_duplicate_service(self):
+        self.env['TEST_OTHER_UNIT'] = 'another-unified-remote.service'
+        self.env['TEST_OTHER_EXEC'] = str(self.binary)
+        result = self.run_install('--mouse-only', '--install-service', '--no-restart', success=False)
+        self.assertIn('Automatic startup already uses', result.stderr)
+        self.assertFalse((self.base / 'backups').exists())
+
+    def test_desktop_autostart_prevents_duplicate_service(self):
+        autostart = self.home / '.config/autostart'
+        autostart.mkdir(parents=True)
+        (autostart / 'urserver.desktop').write_text('[Desktop Entry]\\nType=Application\\nExec=' + str(self.binary) + '\\n')
+        result = self.run_install('--mouse-only', '--install-service', '--no-restart', success=False)
+        self.assertIn('Automatic startup already uses', result.stderr)
+        self.assertFalse((self.base / 'backups').exists())
+
+    def test_hidden_desktop_autostart_does_not_block_service(self):
+        autostart = self.home / '.config/autostart'
+        autostart.mkdir(parents=True)
+        (autostart / 'disabled.desktop').write_text('[Desktop Entry]\\nHidden=true\\nExec=' + str(self.binary) + '\\n')
+        self.run_install('--mouse-only', '--install-service', '--no-restart')
+        self.assertTrue((self.home / '.config/systemd/user/unified-remote.service').is_file())
 
     def test_broken_screen_helpers_are_outside_wayland_installation_scope(self):
         marker = self.base / 'screen-helper-was-executed'
